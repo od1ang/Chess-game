@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>모바일 체스</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+ margin:0;background:#17181c;color:#fff;
+ font-family:system-ui,-apple-system,"Noto Sans KR",Arial,sans-serif;
+ text-align:center;
+}
+.app{width:min(100%,540px);margin:auto;padding:14px 10px}
+h1{margin:3px 0 4px;font-size:30px}
+#mode{color:#bfc3ca;font-size:14px;margin-bottom:4px}
+#status{height:30px;font-size:20px;font-weight:800}
+
+.board-wrap{
+ width:min(94vw,500px);
+ margin:8px auto 14px;
+ padding:7px;
+ background:#6b4328;
+ border:2px solid #3b2415;
+ border-radius:7px;
+ box-shadow:0 8px 22px #0009;
+}
+#board{
+ width:100%;
+ aspect-ratio:1/1;
+ display:grid;
+ grid-template-columns:repeat(8,1fr);
+ grid-template-rows:repeat(8,1fr);
+ border:2px solid #2b1a10;
+}
+.sq{
+ position:relative;
+ display:flex;
+ align-items:center;
+ justify-content:center;
+ user-select:none;
+ aspect-ratio:1/1;
+}
+.light{background:#f0d9b5}
+.dark{background:#9a633d}
+
+.sq.selected{box-shadow:inset 0 0 0 5px #ffe34b}
+.sq.move::after{
+ content:"";
+ width:23%;height:23%;border-radius:50%;
+ background:#3edc70;
+ position:absolute;
+}
+.sq.capture{box-shadow:inset 0 0 0 5px #ff5757}
+
+.piece{
+ position:relative;
+ z-index:2;
+ font-family:"Noto Sans Symbols 2","DejaVu Sans","Segoe UI Symbol",serif;
+ font-size:clamp(31px,10.5vw,57px);
+ line-height:1;
+}
+.white-piece{
+ color:#fff;
+ text-shadow:0 2px 2px #000,0 0 2px #000;
+}
+.black-piece{
+ color:#161616;
+ text-shadow:0 1px 1px #fff8;
+}
+
+.controls{
+ display:flex;gap:8px;justify-content:center;flex-wrap:wrap
+}
+button{
+ border:0;border-radius:12px;padding:12px 14px;
+ font-size:16px;font-weight:800;
+}
+.active{background:#6ee3ff}
+.normal{background:#fff}
+.new{background:#ffd447}
+#msg{margin-top:8px;color:#aaa;font-size:13px}
+
+#promotion{
+ display:none;position:fixed;inset:0;z-index:50;
+ background:#000a;align-items:center;justify-content:center;
+}
+#promotionBox{
+ background:#25272c;border-radius:18px;padding:18px;
+ box-shadow:0 12px 40px #000;
+}
+#promotionBox h2{margin:0 0 14px}
+#promotionChoices{display:flex;gap:8px}
+.promo{
+ width:64px;height:64px;border:0;border-radius:12px;
+ background:#eee;font-size:42px;
+ font-family:"Noto Sans Symbols 2","DejaVu Sans","Segoe UI Symbol",serif;
+}
+</style>
+</head>
+<body>
+<div class="app">
+<h1>♟ 모바일 체스</h1>
+<div id="mode">🤖 컴퓨터 대결 · 백색 플레이어</div>
+<div id="status">♙ 백색 차례</div>
+
+<div class="board-wrap">
+ <div id="board"></div>
+</div>
+
+<div class="controls">
+ <button id="ai" class="active">🤖 컴퓨터</button>
+ <button id="pvp" class="normal">👥 2인용</button>
+ <button id="new" class="new">🔄 새 게임</button>
+</div>
+<div id="msg">말을 누른 뒤 초록색 칸을 눌러 이동!</div>
+</div>
+
+<div id="promotion">
+ <div id="promotionBox">
+  <h2>폰 승급!</h2>
+  <div id="promotionChoices"></div>
+ </div>
+</div>
+
+<script>
+const boardEl=document.getElementById("board");
+const statusEl=document.getElementById("status");
+const modeEl=document.getElementById("mode");
+const promotionEl=document.getElementById("promotion");
+const promotionChoices=document.getElementById("promotionChoices");
+
+const W="W", B="B";
+const chars={
+ K:{W:"♔",B:"♚"},Q:{W:"♕",B:"♛"},
+ R:{W:"♖",B:"♜"},B:{W:"♗",B:"♝"},
+ N:{W:"♘",B:"♞"},P:{W:"♙",B:"♟"}
+};
+
+let board,turn,selected=null,mode="ai",gameOver=false,thinking=false;
+let castle,ep,pendingPromotion=null;
+
+function piece(t,c){return {t,c}}
+function enemy(c){return c===W?B:W}
+function inside(r,c){return r>=0&&r<8&&c>=0&&c<8}
+
+function newGame(){
+ board=Array.from({length:8},()=>Array(8).fill(null));
+ const back=["R","N","B","Q","K","B","N","R"];
+ for(let c=0;c<8;c++){
+  board[0][c]=piece(back[c],B);
+  board[1][c]=piece("P",B);
+  board[6][c]=piece("P",W);
+  board[7][c]=piece(back[c],W);
+ }
+ turn=W;
+ selected=null;
+ gameOver=false;
+ thinking=false;
+ castle={WK:true,WQ:true,BK:true,BQ:true};
+ ep=null;
+ pendingPromotion=null;
+ promotionEl.style.display="none";
+ render();
+}
+
+function clone(){
+ return {
+  board:board.map(row=>row.map(x=>x?{...x}:null)),
+  turn,
+  castle:{...castle},
+  ep:ep?{...ep}:null
+ };
+}
+function restore(s){
+ board=s.board;turn=s.turn;castle=s.castle;ep=s.ep;
+}
+
+function attacked(r,c,by){
+ const pd=by===W?1:-1;
+ for(const dc of [-1,1]){
+  const rr=r+pd,cc=c+dc;
+  if(inside(rr,cc)&&board[rr][cc]?.c===by&&board[rr][cc].t==="P")return true;
+ }
+ const knight=[[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]];
+ for(const [dr,dc] of knight){
+  const rr=r+dr,cc=c+dc;
+  if(inside(rr,cc)&&board[rr][cc]?.c===by&&board[rr][cc].t==="N")return true;
+ }
+ const lines=[
+  [[1,0],[-1,0],[0,1],[0,-1],["R","Q"]],
+  [[1,1],[1,-1],[-1,1],[-1,-1],["B","Q"]]
+ ];
+ for(const line of lines){
+  for(let i=0;i<4;i++){
+   const [dr,dc]=line[i];let rr=r+dr,cc=c+dc;
+   while(inside(rr,cc)){
+    const x=board[rr][cc];
+    if(x){
+     if(x.c===by&&line[4].includes(x.t))return true;
+     break;
+    }
+    rr+=dr;cc+=dc;
+   }
+  }
+ }
+ for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){
+  if(!dr&&!dc)continue;
+  const rr=r+dr,cc=c+dc;
+  if(inside(rr,cc)&&board[rr][cc]?.c===by&&board[rr][cc].t==="K")return true;
+ }
+ return false;
+}
+
+function kingPos(color){
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++)
+  if(board[r][c]?.c===color&&board[r][c].t==="K")return [r,c];
+ return null;
+}
+function inCheck(color){
+ const k=kingPos(color);
+ return k ? attacked(k[0],k[1],enemy(color)) : true;
+}
+
+function pseudo(r,c){
+ const x=board[r][c],out=[];
+ if(!x)return out;
+ const add=(rr,cc,extra={})=>{
+  if(inside(rr,cc))out.push({r:rr,c:cc,...extra});
+ };
+ if(x.t==="P"){
+  const d=x.c===W?-1:1,start=x.c===W?6:1;
+  if(inside(r+d,c)&&!board[r+d][c]){
+   add(r+d,c);
+   if(r===start&&!board[r+2*d][c])add(r+2*d,c);
+  }
+  for(const dc of [-1,1]){
+   const rr=r+d,cc=c+dc;
+   if(!inside(rr,cc))continue;
+   if(board[rr][cc]?.c===enemy(x.c))add(rr,cc,{capture:true});
+   if(ep&&ep.r===rr&&ep.c===cc)add(rr,cc,{capture:true,enPassant:true});
+  }
+ }
+ if(x.t==="N"){
+  for(const [dr,dc] of [[2,1],[2,-1],[-2,1],[-2,-1],[1,2],[1,-2],[-1,2],[-1,-2]]){
+   const rr=r+dr,cc=c+dc;
+   if(inside(rr,cc)&&(!board[rr][cc]||board[rr][cc].c!==x.c))
+    add(rr,cc,{capture:!!board[rr][cc]});
+  }
+ }
+ if(["B","R","Q"].includes(x.t)){
+  const ds=[];
+  if(x.t==="B"||x.t==="Q")ds.push([1,1],[1,-1],[-1,1],[-1,-1]);
+  if(x.t==="R"||x.t==="Q")ds.push([1,0],[-1,0],[0,1],[0,-1]);
+  for(const [dr,dc] of ds){
+   let rr=r+dr,cc=c+dc;
+   while(inside(rr,cc)){
+    if(!board[rr][cc])add(rr,cc);
+    else{
+     if(board[rr][cc].c!==x.c)add(rr,cc,{capture:true});
+     break;
+    }
+    rr+=dr;cc+=dc;
+   }
+  }
+ }
+ if(x.t==="K"){
+  for(let dr=-1;dr<=1;dr++)for(let dc=-1;dc<=1;dc++){
+   if(!dr&&!dc)continue;
+   const rr=r+dr,cc=c+dc;
+   if(inside(rr,cc)&&(!board[rr][cc]||board[rr][cc].c!==x.c))
+    add(rr,cc,{capture:!!board[rr][cc]});
+  }
+  if(!inCheck(x.c)){
+   const row=x.c===W?7:0;
+   if(r===row&&c===4){
+    if((x.c===W?castle.WK:castle.BK)&&
+       !board[row][5]&&!board[row][6]&&
+       !attacked(row,5,enemy(x.c))&&!attacked(row,6,enemy(x.c)))
+      add(row,6,{castle:"K"});
+    if((x.c===W?castle.WQ:castle.BQ)&&
+       !board[row][1]&&!board[row][2]&&!board[row][3]&&
+       !attacked(row,3,enemy(x.c))&&!attacked(row,2,enemy(x.c)))
+      add(row,2,{castle:"Q"});
+   }
+  }
+ }
+ return out;
+}
+
+function legal(r,c){
+ const x=board[r][c];
+ if(!x||x.c!==turn)return [];
+ const result=[];
+ for(const m of pseudo(r,c)){
+  const s=clone();
+  applyMove(r,c,m,false);
+  if(!inCheck(x.c))result.push(m);
+  restore(s);
+ }
+ return result;
+}
+
+function allLegal(color){
+ const old=turn;turn=color;
+ const arr=[];
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++)
+  if(board[r][c]?.c===color)
+   for(const m of legal(r,c))arr.push({from:{r,c},...m});
+ turn=old;
+ return arr;
+}
+
+function applyMove(r,c,m,renderIt=true){
+ const x=board[r][c];
+ const captured=board[m.r][m.c];
+
+ board[r][c]=null;
+ board[m.r][m.c]=x;
+
+ if(m.enPassant){
+  board[m.r+(x.c===W?1:-1)][m.c]=null;
+ }
+
+ if(x.t==="K"){
+  if(x.c===W){castle.WK=false;castle.WQ=false}
+  else{castle.BK=false;castle.BQ=false}
+  if(m.castle==="K"){
+   const row=x.c===W?7:0;
+   board[row][5]=board[row][7];
+   board[row][7]=null;
+  }
+  if(m.castle==="Q"){
+   const row=x.c===W?7:0;
+   board[row][3]=board[row][0];
+   board[row][0]=null;
+  }
+ }
+
+ if(x.t==="R"){
+  if(r===7&&c===0)castle.WQ=false;
+  if(r===7&&c===7)castle.WK=false;
+  if(r===0&&c===0)castle.BQ=false;
+  if(r===0&&c===7)castle.BK=false;
+ }
+ if(captured?.t==="R"){
+  if(m.r===7&&m.c===0)castle.WQ=false;
+  if(m.r===7&&m.c===7)castle.WK=false;
+  if(m.r===0&&m.c===0)castle.BQ=false;
+  if(m.r===0&&m.c===7)castle.BK=false;
+ }
+
+ ep=null;
+ if(x.t==="P"&&Math.abs(m.r-r)===2)ep={r:(r+m.r)/2,c:c};
+
+ // 실제 플레이어의 승급
+ if(x.t==="P"&&(m.r===0||m.r===7)){
+  if(renderIt){
+   selected=null;
+   render();
+   showPromotion(m.r,m.c,x.c);
+  }
+  return;
+ }
+
+ turn=enemy(turn);
+ if(renderIt){
+  selected=null;
+  render();
+  checkEnd();
+ }
+}
+
+function showPromotion(r,c,color){
+ pendingPromotion={r,c,color};
+ promotionChoices.innerHTML="";
+ for(const [type,label] of [["Q","퀸"],["R","룩"],["B","비숍"],["N","나이트"]]){
+  const b=document.createElement("button");
+  b.className="promo";
+  b.textContent=chars[type][color];
+  b.title=label;
+  b.onclick=()=>finishPromotion(type);
+  promotionChoices.appendChild(b);
+ }
+ promotionEl.style.display="flex";
+}
+
+function finishPromotion(type){
+ if(!pendingPromotion)return;
+ const {r,c}=pendingPromotion;
+ board[r][c].t=type;
+ pendingPromotion=null;
+ promotionEl.style.display="none";
+ turn=enemy(turn);
+ selected=null;
+ render();
+ checkEnd();
+ if(mode==="ai"&&turn===B&&!gameOver){
+  thinking=true;render();setTimeout(aiMove,350);
+ }
+}
+
+function checkEnd(){
+ const moves=allLegal(turn);
+ if(!moves.length){
+  gameOver=true;
+  if(inCheck(turn))
+   statusEl.textContent=(turn===W?"⚫ 흑색":"⚪ 백색")+" 체크메이트! 🏆";
+  else statusEl.textContent="🤝 스테일메이트! 무승부";
+ }else{
+  statusEl.textContent=turn===W?"♙ 백색 차례":"♟ 흑색 차례";
+  if(inCheck(turn))statusEl.textContent+=" · 체크!";
+ }
+}
+
+function tap(r,c){
+ if(gameOver||thinking||pendingPromotion)return;
+ if(mode==="ai"&&turn===B)return;
+
+ if(selected){
+  const m=legal(selected.r,selected.c).find(z=>z.r===r&&z.c===c);
+  if(m){
+   applyMove(selected.r,selected.c,m,true);
+   if(mode==="ai"&&turn===B&&!pendingPromotion&&!gameOver){
+    thinking=true;render();setTimeout(aiMove,350);
+   }
+   return;
+  }
+ }
+ if(board[r][c]?.c===turn){
+  selected={r,c};
+  render();
+ }
+}
+
+function render(){
+ boardEl.innerHTML="";
+ const possible=selected?legal(selected.r,selected.c):[];
+ const kp=kingPos(turn);
+
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+  const cell=document.createElement("div");
+  cell.className="sq "+((r+c)%2?"dark":"light");
+
+  if(selected?.r===r&&selected?.c===c)cell.classList.add("selected");
+
+  const mv=possible.find(z=>z.r===r&&z.c===c);
+  if(mv)cell.classList.add(mv.capture||mv.enPassant?"capture":"move");
+
+  if(kp&&kp[0]===r&&kp[1]===c&&inCheck(turn))
+   cell.classList.add("capture");
+
+  const x=board[r][c];
+  if(x){
+   const el=document.createElement("div");
+   el.className="piece "+(x.c===W?"white-piece":"black-piece");
+   el.textContent=chars[x.t][x.c];
+   cell.appendChild(el);
+  }
+
+  cell.addEventListener("click",()=>tap(r,c));
+  boardEl.appendChild(cell);
+ }
+
+ modeEl.textContent=mode==="ai"?"🤖 컴퓨터 대결 · 백색 플레이어":"👥 2인용";
+ if(!gameOver)statusEl.textContent=thinking?"🤖 컴퓨터 생각 중...":(turn===W?"♙ 백색 차례":"♟ 흑색 차례");
+}
+
+function material(){
+ let s=0;
+ const value={P:100,N:320,B:330,R:500,Q:900,K:20000};
+ for(let r=0;r<8;r++)for(let c=0;c<8;c++){
+  const x=board[r][c];
+  if(x)s+=(x.c===B?-1:1)*value[x.t];
+ }
+ return s;
+}
+
+function aiMove(){
+ if(mode!=="ai"||turn!==B||gameOver){thinking=false;render();return}
+ const moves=allLegal(B);
+ if(!moves.length){thinking=false;checkEnd();render();return}
+
+ // 간단 AI: 잡기와 높은 가치의 말을 우선
+ let best=-Infinity, choices=[];
+ for(const m of moves){
+  const s=clone();
+  const captured=board[m.r][m.c];
+  applyMove(m.from.r,m.from.c,m,false);
+  let score=-material();
+  if(captured)score+=({
+   P:100,N:320,B:330,R:500,Q:900,K:20000
+  })[captured.t];
+  if(m.castle)score+=30;
+  restore(s);
+
+  if(score>best){best=score;choices=[m]}
+  else if(score===best)choices.push(m);
+ }
+
+ const m=choices[Math.floor(Math.random()*choices.length)];
+ const x=board[m.from.r][m.from.c];
+ const promotes=x.t==="P"&&(m.r===0||m.r===7);
+
+ thinking=false;
+ applyMove(m.from.r,m.from.c,m,true);
+
+ if(promotes&&pendingPromotion){
+  // 컴퓨터는 퀸으로 자동 승급
+  board[m.r][m.c].t="Q";
+  pendingPromotion=null;
+  promotionEl.style.display="none";
+  turn=enemy(turn);
+  render();
+  checkEnd();
+ }
+}
+
+document.getElementById("ai").onclick=()=>{
+ mode="ai";
+ document.getElementById("ai").className="active";
+ document.getElementById("pvp").className="normal";
+ newGame();
+};
+document.getElementById("pvp").onclick=()=>{
+ mode="pvp";
+ document.getElementById("pvp").className="active";
+ document.getElementById("ai").className="normal";
+ newGame();
+};
+document.getElementById("new").onclick=newGame;
+
+newGame();
+</script>
+</body>
+</html>
